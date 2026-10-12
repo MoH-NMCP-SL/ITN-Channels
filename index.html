@@ -214,6 +214,18 @@ details.probe ul{padding:0 14px 12px 32px;font-size:14.5px;color:#33475b}details
 .mpmodal .box{background:#fff;border-radius:20px;max-width:460px;width:100%;padding:24px;box-shadow:0 20px 50px rgba(0,0,0,.25)}
 .mpmodal h3{font-size:20px;margin-bottom:8px}.mpmodal p{font-size:15px;color:#33475b}
 [data-ro="1"]{opacity:.6;cursor:not-allowed}
+
+/* speech to text */
+.micwrap{margin:-6px 0 16px}
+.micbtn{display:inline-flex;align-items:center;gap:8px;font-size:15px;font-weight:600;color:var(--brand);background:var(--brand-lt);border:1.5px solid transparent;border-radius:24px;padding:10px 16px;min-height:44px;cursor:pointer}
+.micbtn.on{background:#fdecea;color:var(--err);border-color:#f6c4bf}
+.micbtn.on::before{content:"";width:10px;height:10px;border-radius:50%;background:var(--err);animation:micpulse 1s ease-in-out infinite}
+@keyframes micpulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.7)}}
+@media (prefers-reduced-motion:reduce){.micbtn.on::before{animation:none}}
+.micbtn.on svg{display:none}
+.miclive{font-size:14.5px;color:var(--muted);font-style:italic;margin-top:8px;min-height:0}
+.micnote{font-size:13px;color:var(--muted);margin-top:6px}
+.micnote.no{color:var(--err)}
 /* read aloud with highlighting */
 .ttsbar{display:flex;gap:10px;margin-bottom:12px}
 #ttsPlay{flex:1}#ttsStop{flex:0 0 30%}
@@ -396,7 +408,8 @@ table.cov{border-collapse:separate;border-spacing:0;width:100%;min-width:640px;f
             <h2>Your notes on the costing</h2>
             <p class="hint" id="notesHint"></p>
             <div class="intro" id="notesProbes"></div>
-            <label class="f"><span>Notes, not asked of the informant</span><textarea id="f_notes" rows="7"></textarea></label>
+            <label class="f"><span>Notes, not asked of the informant</span><textarea id="f_notes" rows="7" placeholder="Type, or tap Speak the answer and talk"></textarea></label>
+            <div id="notesMic"></div>
         </div>
     </div>
 
@@ -671,6 +684,7 @@ function sectionState(sec) {
     return d === sec.idx.length ? 'done' : started ? 'part' : 'none';
 }
 function renderQuestion() {
+    if (typeof micStop === 'function') micStop();
     if (S.hub !== false) { renderHub(); return; }
     $('qHub').classList.add('hidden'); $('qCard').classList.remove('hidden'); $('qHead').classList.remove('hidden');
     var qs = askable(), i = Math.min(S.q, qs.length - 1), q = qs[i], a = ansOf(i);
@@ -687,7 +701,8 @@ function renderQuestion() {
         + '<div class="yn three" data-f="asked">' + ['Asked', 'Not relevant to this respondent'].map(function (v) {
             return '<button type="button" data-v="' + v + '" aria-pressed="' + (a.asked === v) + '">' + (v === 'Asked' ? 'Asked' : 'Not relevant') + '</button>'; }).join('') + '</div>';
     if (a.asked === 'Asked') {
-        h += '<label class="f"><span>Participant response <i>*</i></span><textarea data-f="response" rows="6" placeholder="Write what the respondent said">' + escH(a.response) + '</textarea></label>'
+        h += '<label class="f"><span>Participant response <i>*</i></span><textarea id="qResp" data-f="response" rows="6" placeholder="Type, or tap Speak the answer and talk">' + escH(a.response) + '</textarea></label>'
+            + micHtml('qResp')
             + '<label class="f"><span>Where do the quantities and costs come from? <i>*</i></span><select data-f="source"><option value="">Select</option>'
             + ['Records', 'Respondent recall', 'Both records and recall', 'No quantities or costs given'].map(function (v) { return '<option' + (a.source === v ? ' selected' : '') + '>' + v + '</option>'; }).join('') + '</select></label>'
             + (q.records ? '<label class="f"><span>Records for this question</span><select data-f="record"><option value="">Select</option>'
@@ -830,6 +845,72 @@ function renderReview() {
 }
 
 
+
+/* ================= speech to text for open answers ================= */
+/* The interviewer taps Speak the answer and talks; the words are typed into the box as they are recognised.
+   Uses the phone's own speech recognition (Chrome on Android, Safari on iPhone). Most phones need internet for it. */
+var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+var MIC = { rec: null, target: '', want: false, base: '' };
+function micHtml(target) {
+    if (!SR) return '<div class="micwrap"><div class="micnote">Speaking the answer is not available in this browser. Please type it.</div></div>';
+    return '<div class="micwrap"><button type="button" class="micbtn" data-mic="' + target + '">'
+        + '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/></svg>'
+        + '<span>Speak the answer</span></button><div class="miclive" data-live="' + target + '"></div><div class="micnote" data-mnote="' + target + '"></div></div>';
+}
+function micUi(on) {
+    var b = document.querySelector('[data-mic="' + MIC.target + '"]');
+    if (b) { b.classList.toggle('on', on); b.querySelector('span').textContent = on ? 'Listening… tap to stop' : 'Speak the answer'; }
+    if (!on) { var l = document.querySelector('[data-live="' + MIC.target + '"]'); if (l) l.textContent = ''; }
+}
+function micNote(t, bad) { var n = document.querySelector('[data-mnote="' + MIC.target + '"]'); if (n) { n.textContent = t; n.classList.toggle('no', !!bad); } }
+function micAppend(text) {
+    var ta = $(MIC.target); if (!ta || !text) return;
+    text = text.trim(); if (!text) return;
+    var cur = ta.value.replace(/\s+$/, '');
+    var newSentence = !cur || /[.!?]$/.test(cur);
+    if (newSentence) text = text.charAt(0).toUpperCase() + text.slice(1);
+    ta.value = cur + (cur ? ' ' : '') + text;
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+function micStart(target) {
+    micStop();
+    if (!SR) return;
+    if (!navigator.onLine) { MIC.target = target; micNote('There is no internet, and most phones need it to turn speech into text. Please type the answer, or try again when online.', true); }
+    MIC.target = target; MIC.want = true;
+    var r = new SR();
+    r.lang = 'en-GB'; r.continuous = true; r.interimResults = true; r.maxAlternatives = 1;
+    r.onresult = function (e) {
+        var interim = '';
+        for (var i = e.resultIndex; i < e.results.length; i++) {
+            var res = e.results[i];
+            if (res.isFinal) micAppend(res[0].transcript); else interim += res[0].transcript;
+        }
+        var l = document.querySelector('[data-live="' + MIC.target + '"]'); if (l) l.textContent = interim;
+    };
+    r.onerror = function (e) {
+        var m = { 'not-allowed': 'The microphone is blocked. Allow the microphone for this app in the browser settings, then try again.',
+                  'service-not-allowed': 'The microphone is blocked. Allow the microphone for this app in the browser settings, then try again.',
+                  'network': 'Speech to text needs internet on this phone. Please type the answer, or try again when online.',
+                  'audio-capture': 'No microphone was found on this phone.' }[e.error];
+        if (m) { MIC.want = false; micNote(m, true); }
+    };
+    r.onend = function () { if (MIC.want && MIC.rec === r) { try { r.start(); return; } catch (x) {} } if (MIC.rec === r) { MIC.rec = null; micUi(false); } };
+    MIC.rec = r;
+    try { r.start(); micUi(true); if (navigator.onLine) micNote('Speak clearly. Check the words after you stop, and correct anything the phone heard wrongly.'); }
+    catch (x) { MIC.rec = null; micUi(false); micNote('Speaking the answer could not start. Please type it.', true); }
+}
+function micStop() {
+    MIC.want = false;
+    if (MIC.rec) { var r = MIC.rec; MIC.rec = null; try { r.stop(); } catch (x) {} }
+    if (MIC.target) micUi(false);
+}
+document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-mic]'); if (!b || b.disabled) return;
+    e.preventDefault();
+    if (MIC.rec && MIC.target === b.dataset.mic) micStop(); else micStart(b.dataset.mic);
+});
+window.addEventListener('pagehide', micStop);
+
 /* ================= read the introduction aloud, highlighting each word ================= */
 /* Uses the phone's own text to speech voice, so it also works without internet once a voice is installed.
    Each sentence is spoken on its own; the word being spoken is highlighted when the voice reports word
@@ -928,6 +1009,7 @@ window.addEventListener('pagehide', function () { ttsStop(); });
 /* ================= steps ================= */
 var STEPS = ['Guide', 'Informant', 'Questions', 'Notes', 'Review'];
 function goto(step) {
+    if (typeof micStop === 'function') micStop();
     if (typeof ttsStop === 'function') ttsStop();
     S.step = step;
     document.querySelectorAll('.step').forEach(function (el) { el.classList.toggle('on', +el.dataset.step === step); });
@@ -937,7 +1019,7 @@ function goto(step) {
     if (step === 0) renderGuides();
     if (step === 1) renderInfo();
     if (step === 2) { S.hub = true; renderQuestion(); }
-    if (step === 3) { $('f_notes').value = S.notes; var g = G(), n = g.questions.filter(function (q) { return q.internal; })[0];
+    if (step === 3) { $('notesMic').innerHTML = micHtml('f_notes'); $('f_notes').value = S.notes; var g = G(), n = g.questions.filter(function (q) { return q.internal; })[0];
         $('notesHint').textContent = n ? n.q : 'Record any notes on the cost collection process which may be relevant to future costing exercises.';
         $('notesProbes').innerHTML = n && n.costing.length ? '<ul>' + n.costing.map(function (x) { return '<li>' + escH(x) + '</li>'; }).join('') + '</ul>' : ''; }
     if (step === 4) { renderReview(); [].forEach.call($('confirm').children, function (x) { x.setAttribute('aria-pressed', x.dataset.v === S.confirm ? 'true' : 'false'); }); }
@@ -1101,6 +1183,7 @@ function submit() {
 /* ================= views and navigation ================= */
 var VIEW = '', HIST = [''], AT = 0;
 function showView(v) {
+    if (typeof micStop === 'function') micStop();
     if (typeof ttsStop === 'function') ttsStop();
     VIEW = v;
     $('landing').classList.toggle('hidden', !!v);
